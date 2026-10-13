@@ -161,10 +161,21 @@ def _extract_parts(parts: list) -> list[dict]:
         if isinstance(root, TextPart) and getattr(root, "text", None):
             out.append({"kind": "text", "text": root.text})
         elif getattr(root, "data", None) is not None:
+            data_val = root.data
             meta = getattr(root, "metadata", None) or {}
             mime = meta.get("mimeType") if isinstance(meta, dict) else None
+
+            # Unpack nested {'kind': 'data', 'metadata': {...}, 'data': {...}}
+            if isinstance(data_val, dict) and "data" in data_val:
+                inner_meta = data_val.get("metadata") or {}
+                if isinstance(inner_meta, dict) and inner_meta.get("mimeType"):
+                    mime = inner_meta.get("mimeType")
+                data_val = data_val.get("data")
+
             if mime == _A2UI_MIME:
-                out.append({"kind": "a2ui", "data": root.data})
+                out.append({"kind": "a2ui", "data": data_val})
+            elif isinstance(data_val, str) and data_val:
+                out.append({"kind": "text", "text": data_val})
         elif isinstance(root, FilePart):
             uri = getattr(getattr(root, "file", None), "uri", None)
             if uri:
@@ -213,10 +224,16 @@ async def chat(req: Request):
                 got_artifact_update = True
                 parts.extend(_extract_parts(update.artifact.parts))
 
-        # Non-streaming fallback: pull parts from the final task's artifacts.
-        if not got_artifact_update and last_task is not None:
+        # Fallback 1: pull parts from final task's artifacts
+        if not parts and last_task is not None:
             for artifact in getattr(last_task, "artifacts", None) or []:
                 parts.extend(_extract_parts(artifact.parts))
+
+        # Fallback 2: pull parts from final task's message history (agent messages)
+        if not parts and last_task is not None:
+            for hist_msg in getattr(last_task, "history", None) or []:
+                if getattr(hist_msg, "role", None) in (Role.agent, "agent"):
+                    parts.extend(_extract_parts(getattr(hist_msg, "parts", None) or []))
 
     if not parts:
         # The turn produced no text or UI (e.g. the agent only ran tools, or a
